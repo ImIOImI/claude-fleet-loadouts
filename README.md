@@ -1,0 +1,103 @@
+# claude-fleet-loadouts
+
+An **OCI registry repository** of [claude-fleet](https://github.com/ImIOImI/claude-fleet)
+loadouts. Each loadout under [`loadouts/`](loadouts/) is published as its own
+OCI artifact to GitHub Container Registry, so a claude-fleet install can pull
+them with [ORAS](https://oras.land) instead of relying on the app's hardcoded
+built-in starters.
+
+A **loadout** is a reusable, machine-parseable bundle of Claude config (skills,
+slash commands, subagents, rules, a `CLAUDE.md` block, `settings.json`/`.mcp.json`
+merges, and setup scripts) that claude-fleet installs into a workspace on
+demand. See the [`loadout-author`](loadouts/loadout-author) loadout for the full
+authoring guide.
+
+## Registry layout
+
+Each loadout id maps to one OCI repository, tagged `latest` plus its semver
+`version`:
+
+```
+ghcr.io/<owner>/claude-fleet-loadouts/<loadout-id>:<version>
+ghcr.io/<owner>/claude-fleet-loadouts/<loadout-id>:latest
+```
+
+e.g. `ghcr.io/imioimi/claude-fleet-loadouts/spec-driven:1.0.0`.
+
+### Artifact format
+
+- **artifactType:** `application/vnd.claude-fleet.loadout.v1`
+- **Layers:** one per file in the loadout folder. Each layer's
+  `org.opencontainers.image.title` annotation is the file's **loadout-relative
+  path** (`loadout.md`, `CLAUDE.md`, `skills/<name>/SKILL.md`, …), so a plain
+  `oras pull` reconstructs the tree verbatim — no tar/untar.
+- **Manifest annotations** (let a consumer read metadata via
+  `oras manifest fetch` without pulling any blobs):
+  | annotation | value |
+  |---|---|
+  | `com.claude-fleet.loadout.id` | the loadout id (folder name) |
+  | `com.claude-fleet.loadout.title` | `title` from `loadout.md` frontmatter |
+  | `com.claude-fleet.loadout.tags` | comma-joined `tags` |
+  | `org.opencontainers.image.version` | `version` |
+  | `org.opencontainers.image.description` | `description` |
+  | `org.opencontainers.image.source` | this repo |
+
+  > The human title is intentionally **not** stored in the manifest's
+  > `org.opencontainers.image.title` — oras would then write the manifest out
+  > as a stray file on pull. It lives in `com.claude-fleet.loadout.title`.
+
+## Consuming a loadout
+
+Read metadata (cheap — no blobs):
+
+```bash
+oras manifest fetch ghcr.io/imioimi/claude-fleet-loadouts/spec-driven:latest | jq .annotations
+```
+
+Pull the loadout into a directory (this is what the app would drop into
+`<userData>/loadouts/<id>/`):
+
+```bash
+oras pull ghcr.io/imioimi/claude-fleet-loadouts/spec-driven:latest \
+  -o ~/.config/claude-fleet/loadouts/spec-driven
+```
+
+## Publishing
+
+CI does this automatically — [`.github/workflows/publish-loadouts.yml`](.github/workflows/publish-loadouts.yml)
+publishes every loadout on push to `main` (paths `loadouts/**`, `scripts/**`).
+It logs in to GHCR with the workflow `GITHUB_TOKEN` and needs no extra secrets.
+
+### Locally
+
+```bash
+# Requires: oras (https://oras.land) and yq (mikefarah).
+oras login ghcr.io -u <github-username>          # a PAT with write:packages
+
+make dry-run          # validate + preview every loadout, no push
+make publish          # package + push every loadout
+make publish-one DIR=loadouts/spec-driven        # just one
+
+# Or call the scripts directly (REGISTRY/OWNER/REPO are overridable env vars):
+OWNER=imioimi ./scripts/publish-all.sh --dry-run
+./scripts/publish-loadout.sh loadouts/spec-driven
+```
+
+## Authoring a loadout
+
+Add a folder under `loadouts/<id>/` with at least a `loadout.md`
+(YAML frontmatter — `title`, `description` required; `version`, `tags`
+recommended — followed by a markdown body). Drop convention files alongside it:
+`CLAUDE.md`, `skills/`, `commands/`, `agents/`, `rules/`, `output-styles/`.
+Bump `version` whenever you change a loadout. The
+[`loadout-author`](loadouts/loadout-author) loadout documents the full format.
+
+## Repo layout
+
+```
+loadouts/<id>/...            loadout source folders (the published content)
+scripts/publish-loadout.sh   package + push ONE loadout via oras
+scripts/publish-all.sh       run publish-loadout.sh over every loadout
+.github/workflows/           CI: publish on push to main
+Makefile                     dry-run / publish convenience targets
+```

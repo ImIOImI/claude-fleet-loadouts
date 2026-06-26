@@ -1,0 +1,5 @@
+# Local oras/OCI scratch
+*.tar
+*.tar.gz
+/tmp-oci-layout/
+.DS_Store
