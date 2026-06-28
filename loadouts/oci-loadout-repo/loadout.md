@@ -1,6 +1,6 @@
 ---
 title: OCI Loadout Repo
-version: 1.0.0
+version: 1.1.0
 description: Teaches Claude to build a standalone OCI repository that distributes claude-fleet loadouts as OCI artifacts on GHCR. Install in a workspace where you set up or scaffold a loadout distribution repo. Covers layout, artifact format, ORAS publish scripts, the CI workflow, and GitHub repo creation — not just pushing to an existing one.
 tags: [skill, oci, oras, ghcr, distribution, ci, meta]
 ---

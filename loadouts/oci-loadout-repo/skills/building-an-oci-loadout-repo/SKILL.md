@@ -50,6 +50,16 @@ the Go YAML one).
   `org.opencontainers.image.version`, `org.opencontainers.image.description`,
   `org.opencontainers.image.source`.
 
+**Discovery index.** In addition to the per-loadout artifacts, the repo
+publishes one **index** artifact at `<registry>/<owner>/<repo>/index:latest`,
+artifactType `application/vnd.claude-fleet.loadout-index.v1`, with a single
+`index.json` layer holding a JSON array of `{ id, title, description, tags,
+version }` (one per loadout, sorted by id; an absent `version` is emitted as
+`0.0.0`). It exists because OCI/GHCR expose no anonymous namespace listing — a
+consumer pulls this one artifact to learn what loadouts the repo offers, then
+pulls each `<id>:<version>` it wants. Built by `scripts/build-index.sh` and
+pushed by `scripts/publish-all.sh`.
+
 ### ⚠ The one non-obvious gotcha
 
 Do **NOT** put `org.opencontainers.image.title` on the **manifest**. `oras pull`
