@@ -1,6 +1,6 @@
 ---
 title: Loadout Author
-version: 1.0.0
+version: 1.1.0
 description: Teaches Claude how to write claude-fleet loadouts — the loadout.md format, the convention folders (skills/commands/rules), and scripts/dependencies. Install where you author loadouts.
 tags: [skill, authoring, meta]
 ---
