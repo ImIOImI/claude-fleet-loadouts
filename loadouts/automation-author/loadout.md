@@ -1,6 +1,6 @@
 ---
 title: Automation Author
-version: 1.1.0
+version: 1.2.0
 description: Makes a workspace a good claude-fleet automations workspace — drafts automations from plain-language requests, reviews proposals, and answers questions across all automations. Install into the workspace you use as the automations workspace.
 tags: [skill, automations, authoring]
 ---
