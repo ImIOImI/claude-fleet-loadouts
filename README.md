@@ -108,8 +108,10 @@ OWNER=imioimi ./scripts/publish-all.sh --dry-run
 Add a folder under `loadouts/<id>/` with at least a `loadout.md`
 (YAML frontmatter — `title`, `description` required; `version`, `tags`
 recommended — followed by a markdown body). Drop convention files alongside it:
-`CLAUDE.md`, `skills/`, `commands/`, `agents/`, `rules/`, `output-styles/`.
-Bump `version` whenever you change a loadout. The
+`CLAUDE.md`, `skills/`, `commands/`, `agents/`, `rules/`, `output-styles/`,
+and `automations/<name>/automation.yaml` (claude-fleet automations, with any
+script files beside it; `$self` means the workspace the loadout is installed
+into). Bump `version` whenever you change a loadout. The
 [`loadout-author`](loadouts/loadout-author) loadout documents the full format.
 
 ## Repo layout

@@ -22,12 +22,33 @@ A loadout is one folder; its name is the loadout id.
       rules/<name>.md           (optional)
       output-styles/<name>.md   (optional)
       scripts/                  (optional: referenced from loadout.md)
+      automations/<name>/automation.yaml   (optional: a claude-fleet automation)
+      automations/<name>/<script>.sh       (optional: inlined via run: ./<script>.sh)
 
 Everything under skills/, commands/, agents/, rules/, output-styles/ plus a
 root CLAUDE.md is copied into the workspace's .claude/ by convention — you do
 not list those files anywhere, just put them in the folder. On install they
 land at .claude/skills/<name>/SKILL.md, .claude/commands/<name>.md, etc.; the
 root CLAUDE.md is appended to the workspace CLAUDE.md inside a marked block.
+
+## Automations
+
+A loadout can ship claude-fleet automations: one folder per automation under
+`automations/`, holding `automation.yaml` (the same format as the app's
+automation editor) and any script files it uses. On install:
+
+- `$self` in `prompt.workspace`, `script.runIn`, `event.workspace` or
+  `manual.allowFrom` becomes the workspace the loadout is installed into.
+- A script step's `run: ./check.sh` is replaced with that file's contents.
+- The install review lists each automation with a tick (on by default on
+  first install). An automation whose script needs a secret that isn't set is
+  installed off. One with a `runIn: host` step is skipped unless the user
+  allows host scripts for this loadout.
+- Updating the loadout updates automations the user hasn't edited. Edited
+  ones are kept as they are, and new ones arrive off. Uninstalling removes
+  them.
+
+Install the `automation-author` loadout for the full automation format.
 
 ## loadout.md
 
