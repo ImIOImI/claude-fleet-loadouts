@@ -38,7 +38,54 @@ steps:                               # 1–10, in order
 ```
 
 Placeholders: `{{args.<param>}}`, `{{trigger.kind}}`, `{{trigger.workspace}}`,
-`{{trigger.todo}}`, `{{run.id}}`. Every prompt also gets a footer with the run id.
+`{{trigger.todo}}`, `{{run.id}}`, `{{steps.<id>.stdout}}`. Every prompt also gets a footer with the run id.
+
+## Script steps
+
+A step can run a script instead of prompting. Scripts are cheap, exact and
+need no tokens, so they're good for fetching data, checking thresholds and
+deduping. Pair one with a prompt step when judgment is needed.
+
+```yaml
+  - id: fetch
+    script:
+      run: |
+        since=$(echo "$FLEET_STATE" | jq -r '.since // empty')
+        curl -sf -H "Authorization: Bearer $WEBEX_TOKEN" "https://webexapis.com/v1/messages?roomId=$ARG_ROOM" > msgs.json
+        n=$(jq '.items | length' msgs.json)
+        [ "$n" -eq 0 ] && exit 10                      # nothing to do: the run stops quietly
+        jq -r '.items[] | "\(.personEmail): \(.text)"' msgs.json   # plain output → {{steps.fetch.stdout}}
+        fleet-emit state "$(jq -c '{since: .items[0].created}' msgs.json)"
+      secrets: [WEBEX_TOKEN]
+      timeout: 2m
+  - id: triage
+    prompt:
+      workspace: ops-oncall
+      mode: fresh
+      message: |
+        Turn real asks in these messages into todos (key "webex:<message id>"):
+        {{steps.fetch.stdout}}
+```
+
+- Runs with **bash in the automations workspace's container** by default,
+  in `/workspace/automations/<id>/` (files persist between runs).
+  `runIn: <workspace>` runs in another container workspace.
+  `runIn: host` with `shell: bash | sh | pwsh | wsl:<distro>` runs on the
+  user's computer. Only use that when the task needs the machine itself; it
+  always needs approval and is flagged red.
+- **Inputs are env only:** `ARG_<NAME>`, `FLEET_ARGS` (JSON), `FLEET_STATE`
+  (JSON from the last run, `{}` at first), `FLEET_TRIGGER`, `FLEET_RUN_ID`, and
+  each key listed in `secrets` (from the executing workspace's secrets). Never
+  paste args into script text.
+- **Outputs are stdout lines.** `fleet-emit todo "title" --key K --priority P --tag T --body B`,
+  `fleet-emit notify "title"` and `fleet-emit state '<json>'` (or print
+  `{"todo":{…}}` / `{"notify":{…}}` / `{"state":…}` yourself). There's a
+  limit of 50 todos/notifications per step. Every other line is plain output
+  for later prompts.
+- **Exit codes:** 0 = continue, **10 = nothing to do** (stop quietly), anything
+  else = failure (stderr is shown). A failed script posts nothing.
+- A prompt step quotes `{{steps.<id>.stdout}}` as data, so the worker can't be
+  steered by text inside it.
 
 ## Writing the step prompt
 
