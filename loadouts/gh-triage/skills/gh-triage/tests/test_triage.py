@@ -5,24 +5,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import triage as t
 
 
-def note(reason="review_requested", repo="SumerSports/other", url="https://api.github.com/repos/SumerSports/other/pulls/7"):
+def note(reason="review_requested", repo="AcmeCorp/other", url="https://api.github.com/repos/AcmeCorp/other/pulls/7"):
     return {"id": "1", "reason": reason, "repository": {"full_name": repo, "html_url": f"https://github.com/{repo}"},
             "subject": {"title": "T", "type": "PullRequest", "url": url}}
 
 
-def st(state="OPEN", url="https://github.com/SumerSports/other/pull/7", reviewers=()):
+def st(state="OPEN", url="https://github.com/AcmeCorp/other/pull/7", reviewers=()):
     return {"state": state, "url": url, "reviewers": set(reviewers)}
 
 
-HOME = {"sumersports/tofumate"}
-LOGIN = "ImIOImI"
+HOME = {"acmecorp/core-api"}
+LOGIN = "Octocat"
+
+
+class InOrgs(unittest.TestCase):
+    def test_no_filter_keeps_everything(self):
+        self.assertTrue(t.in_orgs(note(repo="octocat/side-project"), set()))
+
+    def test_filter_matches_owner_case_insensitively(self):
+        self.assertTrue(t.in_orgs(note(repo="AcmeCorp/infra"), {"acmecorp"}))
+        self.assertFalse(t.in_orgs(note(repo="octocat/side-project"), {"acmecorp"}))
+
+    def test_missing_repository_is_outside_any_filter(self):
+        self.assertFalse(t.in_orgs({"id": "1"}, {"acmecorp"}))
 
 
 class LoadHomeRepos(unittest.TestCase):
     def test_strips_comments_blank_and_case(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-            f.write("# header\nSumerSports/Tofumate  # named\n\n  SumerSports/infra\n")
-        self.assertEqual(t.load_home_repos(f.name), {"sumersports/tofumate", "sumersports/infra"})
+            f.write("# header\nAcmeCorp/Core-Api  # named\n\n  AcmeCorp/infra\n")
+        self.assertEqual(t.load_home_repos(f.name), {"acmecorp/core-api", "acmecorp/infra"})
 
 
     def test_missing_file_exits_with_seed_hint(self):
@@ -33,15 +45,15 @@ class LoadHomeRepos(unittest.TestCase):
 
 class ParseSubject(unittest.TestCase):
     def test_pull(self):
-        self.assertEqual(t.parse_subject(note()), ("SumerSports", "other", "pr", 7))
+        self.assertEqual(t.parse_subject(note()), ("AcmeCorp", "other", "pr", 7))
 
     def test_issue(self):
-        n = note(url="https://api.github.com/repos/SumerSports/x/issues/12")
-        self.assertEqual(t.parse_subject(n), ("SumerSports", "x", "issue", 12))
+        n = note(url="https://api.github.com/repos/AcmeCorp/x/issues/12")
+        self.assertEqual(t.parse_subject(n), ("AcmeCorp", "x", "issue", 12))
 
     def test_non_pr_subject(self):
         self.assertIsNone(t.parse_subject(note(url=None)))
-        self.assertIsNone(t.parse_subject(note(url="https://api.github.com/repos/SumerSports/x/releases/9")))
+        self.assertIsNone(t.parse_subject(note(url="https://api.github.com/repos/AcmeCorp/x/releases/9")))
 
 
 class Classify(unittest.TestCase):
@@ -50,22 +62,22 @@ class Classify(unittest.TestCase):
 
     def test_merged_and_closed_done_even_in_home_or_mentioned(self):
         self.assertEqual(self.c(note(reason="mention"), st("MERGED")), ("done", t.RULE_CLOSED))
-        self.assertEqual(self.c(note(repo="SumerSports/tofumate"), st("CLOSED")), ("done", t.RULE_CLOSED))
+        self.assertEqual(self.c(note(repo="AcmeCorp/core-api"), st("CLOSED")), ("done", t.RULE_CLOSED))
 
     def test_noise_review_request_done(self):
         self.assertEqual(self.c(note(), st()), ("done", t.RULE_NOISE))
 
     def test_review_request_outside_home_kept_if_mentioned(self):
-        self.assertEqual(self.c(note(), st(), mentioned={"https://github.com/SumerSports/other/pull/7"}), ("keep", 0))
+        self.assertEqual(self.c(note(), st(), mentioned={"https://github.com/AcmeCorp/other/pull/7"}), ("keep", 0))
 
     def test_review_request_outside_home_kept_if_personal(self):
-        self.assertEqual(self.c(note(), st(reviewers={"imioimi"})), ("keep", 1))
+        self.assertEqual(self.c(note(), st(reviewers={"octocat"})), ("keep", 1))
 
     def test_review_request_lookup_failed_kept(self):
         self.assertEqual(self.c(note(), None), ("keep", 4))
 
     def test_home_team_review_request(self):
-        self.assertEqual(self.c(note(repo="SumerSports/tofumate"), st()), ("keep", 3))
+        self.assertEqual(self.c(note(repo="AcmeCorp/core-api"), st()), ("keep", 3))
 
     def test_mention_reason(self):
         self.assertEqual(self.c(note(reason="mention"), st()), ("keep", 0))
@@ -78,28 +90,28 @@ class Classify(unittest.TestCase):
 
 
 class Query(unittest.TestCase):
-    SUBJ = [("SumerSports", "a", "pr", 1), ("SumerSports", "b", "issue", 2)]
+    SUBJ = [("AcmeCorp", "a", "pr", 1), ("AcmeCorp", "b", "issue", 2)]
 
     def test_build_query_aliases(self):
         q = t.build_query(self.SUBJ)
-        self.assertIn('s0: repository(owner: "SumerSports", name: "a") { pullRequest(number: 1)', q)
-        self.assertIn('s1: repository(owner: "SumerSports", name: "b") { issue(number: 2)', q)
+        self.assertIn('s0: repository(owner: "AcmeCorp", name: "a") { pullRequest(number: 1)', q)
+        self.assertIn('s1: repository(owner: "AcmeCorp", name: "b") { issue(number: 2)', q)
         self.assertIn("reviewRequests", q)
 
     def test_parse_states(self):
         data = {
             "s0": {"pullRequest": {"state": "OPEN", "url": "u0", "reviewRequests": {"nodes": [
-                {"requestedReviewer": {"login": "ImIOImI"}}, {"requestedReviewer": {}}]}}},
+                {"requestedReviewer": {"login": "Octocat"}}, {"requestedReviewer": {}}]}}},
             "s1": None,
         }
         self.assertEqual(t.parse_states(data, self.SUBJ),
-                         {self.SUBJ[0]: {"state": "OPEN", "url": "u0", "reviewers": {"imioimi"}}})
+                         {self.SUBJ[0]: {"state": "OPEN", "url": "u0", "reviewers": {"octocat"}}})
 
 
 class Render(unittest.TestCase):
     def test_html_url_fallback(self):
         self.assertEqual(t.html_url(note(), st(url="u")), "u")
-        self.assertEqual(t.html_url(note(), None), "https://github.com/SumerSports/other")
+        self.assertEqual(t.html_url(note(), None), "https://github.com/AcmeCorp/other")
 
     def test_render(self):
         n = note()
@@ -107,7 +119,7 @@ class Render(unittest.TestCase):
         out = t.render([(n, t.RULE_CLOSED), (n, t.RULE_NOISE)], kept, limit=2)
         self.assertIn("## Cleared 2", out)
         self.assertIn(f"- {t.RULE_CLOSED}: 1", out)
-        self.assertIn("SumerSports/other 2", out)
+        self.assertIn("AcmeCorp/other 2", out)
         self.assertIn("### Mentions (1)", out)
         self.assertIn("- u1 — T (review_requested)", out)
         self.assertIn("- …and 1 more", out)

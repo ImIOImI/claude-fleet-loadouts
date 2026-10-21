@@ -101,6 +101,14 @@ def render(cleared, kept, limit):
     return "\n".join(lines)
 
 
+def in_orgs(n, orgs):
+    """True when no org filter is set, or the thread's repo belongs to one of `orgs` (lowercased)."""
+    if not orgs:
+        return True
+    owner = ((n.get("repository") or {}).get("full_name") or "").split("/", 1)[0].lower()
+    return owner in orgs
+
+
 def gh(*args):
     r = subprocess.run(["gh", *args], capture_output=True, text=True)
     if r.returncode:
@@ -142,11 +150,15 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true", help="report only; mark nothing done")
     p.add_argument("--limit", type=int, default=25, help="max items listed per bucket")
     p.add_argument("--repos", default=HOME_REPOS, help="home repo list")
+    p.add_argument("--org", action="append", default=[],
+                   help="only triage threads from this org (repeatable); others are left untouched")
     a = p.parse_args(argv)
+    orgs = {o.lower() for o in a.org}
 
     login = gh("api", "user", "--jq", ".login").strip()
     home = load_home_repos(a.repos)
-    notes = fetch_notifications()
+    every = fetch_notifications()
+    notes = [n for n in every if in_orgs(n, orgs)]
     subjects = sorted({s for s in map(parse_subject, notes) if s})
     states = fetch_states(subjects)
     mentioned = fetch_mentions()
@@ -165,6 +177,8 @@ def main(argv=None):
     print(("DRY RUN — nothing marked done\n\n" if a.dry_run else "") + render(cleared, kept, a.limit))
     if failed:
         print(f"\n{failed} threads failed to mark done (left in inbox)")
+    if len(every) > len(notes):
+        print(f"\n{len(every) - len(notes)} threads outside {', '.join(sorted(orgs))} left untouched")
     missing = sum(1 for s in subjects if s not in states)
     if missing:
         print(f"\n{missing} subjects could not be looked up (kept)")
