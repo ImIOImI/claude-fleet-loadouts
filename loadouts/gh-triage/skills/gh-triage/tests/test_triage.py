@@ -18,6 +18,18 @@ HOME = {"sumersports/tofumate"}
 LOGIN = "ImIOImI"
 
 
+class InOrgs(unittest.TestCase):
+    def test_no_filter_keeps_everything(self):
+        self.assertTrue(t.in_orgs(note(repo="ImIOImI/claude-fleet"), set()))
+
+    def test_filter_matches_owner_case_insensitively(self):
+        self.assertTrue(t.in_orgs(note(repo="SumerSports/infra"), {"sumersports"}))
+        self.assertFalse(t.in_orgs(note(repo="ImIOImI/claude-fleet"), {"sumersports"}))
+
+    def test_missing_repository_is_outside_any_filter(self):
+        self.assertFalse(t.in_orgs({"id": "1"}, {"sumersports"}))
+
+
 class LoadHomeRepos(unittest.TestCase):
     def test_strips_comments_blank_and_case(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:

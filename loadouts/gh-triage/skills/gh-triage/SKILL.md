@@ -17,7 +17,7 @@ If `home-repos.txt` doesn't exist, `triage.py` exits and says so. Build it:
 
 ## Run
 
-`python3 triage.py` (add `--dry-run` only if the user asks for a preview; `--limit N` caps items per bucket, default 25). It acts first, no confirmation — new activity resurfaces a thread. ~1 min per ~2k threads.
+`python3 triage.py` (add `--dry-run` only if the user asks for a preview; `--limit N` caps items per bucket, default 25; `--org <org>`, repeatable, triages only that org's threads and leaves the rest untouched; `--repos <path>` reads the home-repo list from elsewhere, e.g. a path outside the installed skill so reinstalls can't touch it). It acts first, no confirmation — new activity resurfaces a thread. ~1 min per ~2k threads.
 
 Rules (first match wins, all in `triage.py`):
 1. PR/issue merged or closed → done.

@@ -1,6 +1,6 @@
 ---
 title: GitHub Notification Triage
-version: 1.0.0
+version: 1.1.0
 description: >-
   Adds a gh-triage skill that clears GitHub notification noise and ranks what's
   left. Marks done every thread whose PR/issue is merged or closed, and every
@@ -25,7 +25,8 @@ Installs one skill, `gh-triage`:
 - `triage.py` — stdlib-only engine. Fetches all unread notifications, looks up
   subject state in batched GraphQL, one `mentions:@me` search, then marks threads
   done (`DELETE /notifications/threads/{id}`, 8 concurrent) and prints a ranked
-  report. `--dry-run` reports without writing.
+  report. `--dry-run` reports without writing; `--org` limits it to one org's
+  threads; `--repos` points at a home-repo list kept elsewhere.
 - `seed_home_repos.py` — drafts your `home-repos.txt` from repos you name plus
   org repos created by you or your teams (audit log, falling back to first-commit
   author).
