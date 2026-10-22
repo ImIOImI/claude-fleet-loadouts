@@ -33,6 +33,9 @@ md="$dir/loadout.md"
 [ -f "$md" ] || { echo "error: $md not found (not a loadout folder)" >&2; exit 1; }
 
 id="$(basename "$dir")"
+# `<repo>/index` is the discovery index artifact (publish-all.sh); claude-fleet
+# refuses to pull a loadout with this id.
+[ "$id" != "index" ] || { echo "error: 'index' is reserved for the index artifact; rename $dir" >&2; exit 1; }
 
 # ── Parse the YAML frontmatter (the block between the first two '---' lines) ──
 fm="$(awk 'NR==1 && /^---[[:space:]]*$/{f=1; next} f && /^---[[:space:]]*$/{exit} f{print}' "$md")"
