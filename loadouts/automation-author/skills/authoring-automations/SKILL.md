@@ -20,6 +20,7 @@ triggers:                            # one or more
   - event: { on: todo.created, tag: ci, debounce: 2m }   # session.idle | workspace.started | todo.created
 concurrency: skip                    # skip | queue
 timeout: 30m
+reschedule: { min: 30m }             # optional: runs may pick when it runs next (see below)
 params:
   - { name: branch, type: string, default: main }       # string | number | boolean | enum (values: [...])
 steps:                               # 1–10, in order
@@ -82,6 +83,9 @@ deduping. Pair one with a prompt step when judgment is needed.
   `{"todo":{…}}` / `{"notify":{…}}` / `{"state":…}` yourself). There's a
   limit of 50 todos/notifications per step. Every other line is plain output
   for later prompts.
+- `fleet-emit next 4h` (or `fleet-emit next --at <ISO>`, or print
+  `{"next":{"in":"4h"}}`) asks to run next then. It needs `reschedule` in the
+  definition; see *Letting a run pick the next run*.
 - **Exit codes:** 0 = continue, **10 = nothing to do** (stop quietly), anything
   else = failure (stderr is shown). A failed script posts nothing.
 - A prompt step quotes `{{steps.<id>.stdout}}` as data, so the worker can't be
@@ -109,6 +113,24 @@ The prompted Claude runs **unattended**. Write the prompt so it can finish alone
   without a reason.
 - Event triggers coalesce bursts with `debounce`. An automation never reacts to
   its own todos.
+
+## Letting a run pick the next run
+
+When how soon to check again depends on what a run finds ("nothing changed,
+look again in 4h"; "a deploy is in progress, look again in 10m"), add
+`reschedule: { min: <floor> }` (5m to 30d). Then:
+
+- A script step prints `fleet-emit next 4h` / `fleet-emit next --at <ISO>`.
+- A prompt step tells the worker to call `schedule_next({ run_id: {{run.id}}, in: "4h" })`
+  (or `at`). Fresh sessions get that tool automatically.
+- The last request in a run wins. It takes effect when the run ends with
+  success or exit 10, never sooner than `min` after it ends, and replaces the
+  cron's next fire until it runs. A failed run sets nothing.
+- A cron is optional. Without one, and without a request, the automation waits
+  until it is run by hand or by an event. If it must never stall, keep a slow
+  cron as a safety net, or have the run post a todo when it can't continue.
+- Adding `reschedule`, lowering `min`, or dropping the cron while it's on all
+  need the user's approval; say why in `rationale`.
 
 ## Submitting
 
