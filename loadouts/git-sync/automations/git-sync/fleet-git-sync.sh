@@ -8,7 +8,6 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 
 ROOT="${GIT_SYNC_ROOT:-/shared}"
 CONF="${GIT_SYNC_CONF:-$ROOT/.git-sync.d}"
-AUTHOR="${FLEET_NODE_ID:-}"
 HOLD_MAX_AGE="${GIT_SYNC_HOLD_MAX_AGE:-7200}"
 DEADLINE="${GIT_SYNC_DEADLINE:-200}"             # seconds; no new folder starts after this
 MAX_BYTES="${GIT_SYNC_MAX_FILE_BYTES:-52428800}" # auto-sync never commits files over this
@@ -20,7 +19,7 @@ netc=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30)
 
 changed=0       # something was cloned, pulled or pushed
 reported=0      # a todo, notify or failure was emitted
-need_node_id=0  # an auto-sync folder was skipped for want of FLEET_NODE_ID
+need_id=0       # an auto-sync folder was skipped for want of an identity
 carry=""        # folders not evaluated this run: keep their seen todos
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
@@ -106,11 +105,29 @@ errors=$(jq -r '
 ' <<<"$folders") || config_error "could not validate folder config"
 [ -z "$errors" ] || config_error "$errors"
 
-if [ -n "$AUTHOR" ] && ! [[ "$AUTHOR" =~ ^[a-z0-9-]+@[a-z0-9-]+$ ]]; then
-  say "FLEET_NODE_ID '$AUTHOR' is not <name>@<team>; auto-sync folders skipped"
-  AUTHOR=""
+# ── identity: GIT_SYNC_IDENTITY, else gh's GitHub account, else the last one that worked ──
+ident=$(jq -c '(.identity | objects) // {}' <<<"$state")
+LOGIN="" NAME="" EMAIL=""
+LRE='^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$' ERE='^[^[:space:]<>]+@[^[:space:]<>]+$' NRE='^[^<>[:cntrl:]]+$'
+IRE='^(([^|]+)\|)?([^<>|]+) <(.+)>$' # [login|]Name <email>
+set_id() { # login name email
+  [[ $1 =~ $LRE && $3 =~ $ERE ]] || return 1
+  LOGIN=$1 NAME=$2 EMAIL=$3; [[ $NAME =~ $NRE ]] || NAME=$1
+}
+jf() { jq -r "($1) // empty" <<<"$2" 2>/dev/null; }
+if jq -e 'any(.[]; .mode == "auto-sync")' <<<"$folders" >/dev/null; then
+  if [[ ${GIT_SYNC_IDENTITY-} =~ $IRE ]] &&
+    set_id "${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; then :
+  else
+    [ -z "${GIT_SYNC_IDENTITY-}" ] || say "GIT_SYNC_IDENTITY isn't [login|]Name <email>; ignored"
+    u=$(timeout -k 5 20 gh api user 2>/dev/null) || u="" # e.g. 403 for App installation tokens
+    set_id "$(jf .login "$u")" "$(jf .name "$u")" "$(jf '"\(.id | numbers)+\(.login)@users.noreply.github.com"' "$u")" ||
+      set_id "$(jf .login "$ident")" "$(jf .name "$ident")" "$(jf .email "$ident")"
+  fi
+  [ -z "$LOGIN" ] || ident=$(jq -cn --arg l "$LOGIN" --arg n "$NAME" --arg e "$EMAIL" '{login: $l, name: $n, email: $e}')
 fi
-gitid=(-c "user.name=$AUTHOR" -c "user.email=$AUTHOR@fleet.invalid")
+AUTHOR=${LOGIN,,} # the author folder: logins are case-insensitive
+gitid=(-c "user.name=$NAME" -c "user.email=$EMAIL")
 
 record_failure() { # name message
   local n
@@ -123,6 +140,7 @@ record_failure() { # name message
       "$n runs in a row failed. Last error: $2"
   fi
 }
+no_upstream() { record_failure "$1" "no upstream branch for $(g "$ROOT/$1" symbolic-ref --short HEAD 2>/dev/null)"; }
 record_ok() { failures=$(jq -c --arg k "$1" 'del(.[$k])' <<<"$failures"); }
 
 # ── per-folder operations ──
@@ -152,7 +170,7 @@ check_clone() { # name remote branch → 0 safe; 1 skipped (todo raised)
   local name=$1 dir="$ROOT/$1" keys url head merge bad
   keys=$(g "$dir" config --local --no-includes --name-only --list 2>/dev/null) || keys="(unreadable .git/config)"
   url=$(g "$dir" config --local --no-includes --get-all remote.origin.url 2>/dev/null)
-  head=$(g "$dir" symbolic-ref -q --short HEAD 2>/dev/null || sed 's|^refs/heads/||' "$dir"/.git/rebase-*/head-name 2>/dev/null)
+  head=$(g "$dir" symbolic-ref -q --short HEAD 2>/dev/null || sed 's|^refs/heads/||' "$dir"/.git/rebase-*/head-name 2>/dev/null </dev/null)
   if [ -z "$head" ] && ! rebase_in_progress "$dir"; then
     todo "git-sync:$name:detached" "git-sync: $name is on a detached HEAD" \
       "$dir is on a detached HEAD, so git-sync leaves it alone. Check out $3 to resume syncing: cd $dir && git checkout $3."
@@ -162,7 +180,7 @@ check_clone() { # name remote branch → 0 safe; 1 skipped (todo raised)
   merge=$(g "$dir" config --local --no-includes --get "branch.$3.merge" 2>/dev/null)
   if [ "$url" != "$2" ] || [ "$head" != "$3" ] || { [ -n "$merge" ] && [ "$merge" != "refs/heads/$3" ]; }; then
     todo "git-sync:$name:remote-changed" "git-sync: $name no longer matches its config" \
-      "The clone at $dir doesn't track $2 (branch $3) as configured, so git-sync leaves it alone. To re-clone, move it aside (mv $dir $dir.old); the next run clones it again. If nobody changed the config, its .git/config was edited: don't trust that clone."
+      "$dir doesn't track $2 (branch $3) as configured, so git-sync skips it. To re-clone, move it aside (mv $dir $dir.old). If nobody changed the config, its .git/config was edited: don't trust it."
     say "$name: origin or branch differs from the config; skipped"
     return 1
   fi
@@ -170,7 +188,7 @@ check_clone() { # name remote branch → 0 safe; 1 skipped (todo raised)
     /^user\.(name|email)$/ || /^remote\.origin\.(url|fetch)$/ || $0 == b "remote" || $0 == b "merge")' <<<"$keys" | sort -u)
   if [ -n "$bad" ]; then
     todo "git-sync:$name:unsafe-config" "git-sync: unexpected git config in $name" \
-      "$dir/.git/config sets keys git-sync doesn't allow (they can run commands or redirect pushes), so it skips this folder. Check who set them, then remove them or move the folder aside to re-clone:"$'\n'"$bad"
+      "$dir/.git/config sets keys git-sync doesn't allow (they can run commands or redirect pushes), so it's skipped. Check who set them, then remove them or move the folder aside:"$'\n'"$bad"
     say "$name: unexpected keys in .git/config; skipped"
     return 1
   fi
@@ -196,9 +214,8 @@ pull_rebase() { # name dir → 0 ok; 1 conflict or failure (already reported)
 }
 
 outside_commits_ok() { # name dir → 0 ok to push; 1 blocked (todo raised)
-  # Per-commit, not a tree diff: an add-then-revert of an outside path still shows up here,
-  # so forged commits that cancel out in the tree can't sneak past this check.
-  local paths; paths=$(g "$2" log --format= --name-only '@{u}..HEAD' -- . ":(exclude)$AUTHOR" 2>/dev/null | sort -u | head -n 20)
+  # Per-commit, not a tree diff, so an outside add-then-revert can't sneak past.
+  local paths; paths=$(g "$2" log --format= --name-only '@{u}..HEAD' -- . ":(exclude,literal)$AUTHOR" 2>/dev/null | sort -u | head -n 20)
   [ -z "$paths" ] && return 0
   todo "git-sync:$1:outside-commits" "git-sync: commit(s) outside $AUTHOR/ in $1" \
     "HEAD has local commit(s) touching paths outside $AUTHOR/ (someone else committed in this clone), so nothing is pushed:"$'\n'"$paths"$'\n'"Drop them with: git -C $2 reset --soft @{u}, then review before re-adding your own changes."
@@ -209,8 +226,8 @@ outside_commits_ok() { # name dir → 0 ok to push; 1 blocked (todo raised)
 sync_auto() { # name scoped
   local name=$1 scoped=$2 dir="$ROOT/$1" scope hold m n e p up_before up_mid pulled ahead outside big=() ex=()
   if [ -n "$(unmerged_paths "$dir")" ]; then stash_conflict_todo "$name" "$dir"; return; fi
-  if [ -z "$AUTHOR" ]; then need_node_id=1; say "$name: skipped (FLEET_NODE_ID is not set)"; return; fi
-  if [ "$scoped" = true ]; then scope="$AUTHOR"; hold="$dir/$AUTHOR/.sync-hold"; else scope="."; hold="$dir/.sync-hold"; fi
+  if [ -z "$AUTHOR" ]; then need_id=1; say "$name: skipped (no identity)"; return; fi
+  if [ "$scoped" = true ]; then scope=":(literal)$AUTHOR"; hold="$dir/$AUTHOR/.sync-hold"; else scope="."; hold="$dir/.sync-hold"; fi
   if [ -e "$hold" ]; then
     m=$(stat -c %Y "$hold" 2>/dev/null) || m=$(date +%s)
     if [ $(($(date +%s) - m)) -lt "$HOLD_MAX_AGE" ]; then
@@ -222,7 +239,7 @@ sync_auto() { # name scoped
       "$hold is older than $((HOLD_MAX_AGE / 3600))h, so git-sync ignored it. Delete it if no writer is running."
   fi
   if [ "$scoped" = true ]; then
-    outside=$(g "$dir" status --porcelain -- . ":(exclude)$AUTHOR" ':(exclude,glob)**/.sync-hold' | head -n 20)
+    outside=$(g "$dir" status --porcelain -- . ":(exclude,literal)$AUTHOR" ':(exclude,glob)**/.sync-hold' | head -n 20)
     if [ -n "$outside" ]; then
       todo "git-sync:$name:outside-edits" "git-sync: edits outside $AUTHOR/ in $name" \
         "These stay local and are never pushed by this node:"$'\n'"$outside"
@@ -239,20 +256,17 @@ sync_auto() { # name scoped
     todo "git-sync:$name:large-file" "git-sync: large files in $name" \
       "These are over $MAX_BYTES bytes, so they stay local and aren't committed:"$'\n'"$(printf '%s\n' "${big[@]}" | head -n 20)"
   fi
-  if [ "$scope" = . ] || [ -e "$dir/$scope" ] || [ -n "$(g "$dir" ls-files -- "$scope" | head -n 1)" ]; then
+  if [ "$scope" = . ] || [ -e "$dir/$AUTHOR" ] || [ -n "$(g "$dir" ls-files -- "$scope" | head -n 1)" ]; then
     g "$dir" add -A -- "$scope" ':(exclude,glob)**/.sync-hold' "${ex[@]}" 2>"$ERR" \
       || { record_failure "$name" "add: $(last_err)"; return; }
   fi
   n=$(g "$dir" diff --cached --name-only -- "$scope" "${ex[@]}" | wc -l | tr -d ' ')
   if [ "$n" -gt 0 ]; then
     g "$dir" "${gitid[@]}" -c gc.autoDetach=false \
-      commit -q -m "sync: $n files from $AUTHOR" -- "$scope" "${ex[@]}" 2>"$ERR" || { record_failure "$name" "commit: $(last_err)"; return; }
+      commit -q -m "sync: $n files from $LOGIN" -- "$scope" "${ex[@]}" 2>"$ERR" || { record_failure "$name" "commit: $(last_err)"; return; }
   fi
   up_before=$(upstream "$dir")
-  if [ -z "$up_before" ]; then
-    record_failure "$name" "no upstream branch for $(g "$dir" symbolic-ref --short HEAD 2>/dev/null)"
-    return
-  fi
+  [ -n "$up_before" ] || { no_upstream "$name"; return; }
   pull_rebase "$name" "$dir" || return
   up_mid=$(upstream "$dir")
   pulled=0
@@ -288,10 +302,7 @@ sync_mirror() { # name
     return
   fi
   if ! net "$dir" -c gc.autoDetach=false fetch -q 2>"$ERR"; then record_failure "$name" "fetch: $(last_err)"; return; fi
-  if [ -z "$(upstream "$dir")" ]; then
-    record_failure "$name" "no upstream branch for $(g "$dir" symbolic-ref --short HEAD 2>/dev/null)"
-    return
-  fi
+  [ -n "$(upstream "$dir")" ] || { no_upstream "$name"; return; }
   ahead=$(count "$dir" '@{u}..HEAD')
   if [ "$ahead" -gt 0 ]; then
     todo "git-sync:$name:local-edits" "git-sync: local commits in mirror $name" \
@@ -337,23 +348,21 @@ for ((k = 0; k < total; k++)); do
   sync_folder "$name" "$remote" "$branch" "$mode" "$scoped"
 done
 if [ ${#deferred[@]} -gt 0 ]; then
-  next=${deferred[0]}; carry+=" ${deferred[*]} node-id"
+  next=${deferred[0]}; carry+=" ${deferred[*]} identity"
   say "time limit reached; deferred to the next run: ${deferred[*]}"
 elif [ "$total" -gt 0 ]; then
   next=${rows[(start + 1) % total]%%$'\t'*}
 fi
 
-if [ "$need_node_id" = 1 ]; then
-  todo "git-sync:node-id" "git-sync: set FLEET_NODE_ID to sync auto-sync folders" \
-    "Auto-sync folders commit as the node id, unique per node (<name>@<team>, e.g. troy-laptop@platform, or agent-<name>@<team> for agents). Set FLEET_NODE_ID as an env var on the workspace that runs the git-sync automation. Mirror folders still sync."
-fi
-jq -cn --argjson f "$failures" --argjson s "$seen" --argjson o "$seen_in" --arg c "$carry" --arg n "$next" \
+[ "$need_id" = 0 ] || todo git-sync:identity "git-sync: no identity for auto-sync folders" \
+  "Sign the workspace running git-sync in to GitHub (gh auth login or a GH_TOKEN env var), or set GIT_SYNC_IDENTITY='[login|]Name <email>'. Mirrors still sync."
+jq -cn --argjson f "$failures" --argjson s "$seen" --argjson o "$seen_in" --arg c "$carry" --arg n "$next" --argjson i "$ident" \
   --argjson names "$(jq -c 'map(.name)' <<<"$folders")" '
   def folder: split(":")[1];
   ($c | split(" ")) as $c |
   {state: {failures: ($f | with_entries(select(.key | IN($names[])))),
            seen: (($o | with_entries(select(.key | folder | IN($c[])))) + $s
-                  | with_entries(select(.key | folder | IN($names[], "node-id")))),
-           next: $n}}'
+                  | with_entries(select(.key | folder | IN($names[], "identity")))),
+           next: $n, identity: $i}}'
 if [ "$changed" = 1 ] || [ "$reported" = 1 ]; then exit 0; fi
 exit 10
