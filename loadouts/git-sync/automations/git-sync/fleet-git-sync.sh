@@ -36,7 +36,7 @@ rebase_in_progress() { [ -d "$1/.git/rebase-merge" ] || [ -d "$1/.git/rebase-app
 unmerged_paths() { git -C "$1" diff --name-only --diff-filter=U 2>/dev/null; }
 stash_conflict_todo() { # name dir
   todo "git-sync:$1:conflict" "git-sync: conflict in $1" \
-    "Local edits conflicted with the remote while reapplying the autostash. They are preserved in \`git stash list\` inside $2 (not lost). Resolve with: cd $2 && git status (fix the conflicted files), then git add -A && git stash drop."
+    "Local edits conflicted with the remote while reapplying the autostash. They are preserved in \`git stash list\` inside $2 (not lost). Resolve with: cd $2 && git status (fix the conflicted files), then git restore --staged . && git stash drop."
   say "$1: conflict; local edits are in git stash list"
 }
 
@@ -76,6 +76,7 @@ if [ -n "$AUTHOR" ] && ! [[ "$AUTHOR" =~ ^[a-z0-9-]+@[a-z0-9-]+$ ]]; then
   say "FLEET_NODE_ID '$AUTHOR' is not <name>@<team>; auto-sync folders skipped"
   AUTHOR=""
 fi
+gitid=(-c "user.name=$AUTHOR" -c "user.email=$AUTHOR@fleet.invalid")
 
 # ── failure counters (state carried between runs) ──
 state_in=${FLEET_STATE:-}
@@ -120,15 +121,20 @@ clone_folder() { # name remote branch
 }
 
 pull_rebase() { # name dir → 0 ok; 1 conflict or failure (already reported)
-  if git -C "$2" -c gc.autoDetach=false pull -q --rebase --autostash 2>"$ERR"; then
+  if git -C "$2" "${gitid[@]}" -c gc.autoDetach=false pull -q --rebase --autostash 2>"$ERR"; then
     if [ -n "$(unmerged_paths "$2")" ]; then stash_conflict_todo "$1" "$2"; return 1; fi
     return 0
   fi
   if rebase_in_progress "$2"; then
-    git -C "$2" rebase --abort 2>/dev/null
-    todo "git-sync:$1:conflict" "git-sync: rebase conflict in $1" \
-      "Local commits are kept and not pushed. Resolve with: cd $2 && git pull --rebase"
-    say "$1: rebase conflict; local commits kept"
+    local was_unmerged; was_unmerged=$(unmerged_paths "$2")
+    git -C "$2" "${gitid[@]}" rebase --abort 2>/dev/null
+    if [ -n "$was_unmerged" ]; then
+      todo "git-sync:$1:conflict" "git-sync: rebase conflict in $1" \
+        "Local commits are kept and not pushed. Resolve with: cd $2 && git pull --rebase"
+      say "$1: rebase conflict; local commits kept"
+      return 1
+    fi
+    record_failure "$1" "pull: $(last_err)"
     return 1
   fi
   record_failure "$1" "pull: $(last_err)"
@@ -161,7 +167,7 @@ sync_auto() { # name scoped
   fi
   n=$(git -C "$dir" diff --cached --name-only -- "$scope" | wc -l | tr -d ' ')
   if [ "$n" -gt 0 ]; then
-    git -C "$dir" -c user.name="$AUTHOR" -c user.email="$AUTHOR@fleet.invalid" \
+    git -C "$dir" "${gitid[@]}" \
       commit -q -m "sync: $n files from $AUTHOR" -- "$scope" 2>"$ERR" || { record_failure "$name" "commit: $(last_err)"; return; }
   fi
   up_before=$(upstream "$dir")

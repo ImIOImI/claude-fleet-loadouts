@@ -13,6 +13,7 @@ setup() {
   git config --global init.defaultBranch main
   git config --global user.name seed
   git config --global user.email seed@example.invalid
+  : >"$T/script-gitconfig"
   export GIT_SYNC_ROOT="$T/shared" GIT_SYNC_CONF="$T/shared/.git-sync.d"
   mkdir -p "$GIT_SYNC_CONF"
   export FLEET_NODE_ID=alice@team FLEET_STATE='{}'
@@ -52,7 +53,7 @@ conf() {
     '{folders: [{name: $n, remote: $r, mode: $m} + $x]}' >"$GIT_SYNC_CONF/$1"
 }
 
-sync() { OUT=$(bash "$SCRIPT" 2>"$T/stderr") && RC=0 || RC=$?; }
+sync() { OUT=$(GIT_CONFIG_GLOBAL="$T/script-gitconfig" bash "$SCRIPT" 2>"$T/stderr") && RC=0 || RC=$?; }
 json_lines() { grep '^{' <<<"$OUT" || true; }
 next_state() {
   FLEET_STATE=$(json_lines | jq -c 'select(has("state")) | .state' | tail -n 1)
@@ -247,6 +248,7 @@ test_push_race_is_retried_once() {
   cat >"$(local_dir a)/.git/hooks/pre-push" <<EOF
 #!/bin/sh
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+export GIT_CONFIG_GLOBAL="$T/gitconfig"
 [ -e "$T/raced" ] && exit 0
 touch "$T/raced"
 git clone -q "$r" "$T/race" && cd "$T/race" && echo racer >racer.md && git add -A && git commit -qm race && git push -q origin main
@@ -256,6 +258,18 @@ EOF
   sync; expect_rc 0
   [ "$(remote_file "$r" alice@team/x.md)" = mine ]
   [ "$(remote_file "$r" racer.md)" = racer ]
+}
+test_autosync_rebases_over_concurrent_push() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  push_from_other "$r" bob@team/new.md theirs
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  [ "$(remote_file "$r" bob@team/new.md)" = theirs ]
+  [ "$(remote_file "$r" alice@team/x.md)" = mine ]
+  [ -z "$(json_lines | jq -r 'select(has("todo")) | select(.todo.key == "git-sync:a:conflict")')" ]
+  expect_out "a: pushed 1 commit(s)"
 }
 test_rebase_conflict_keeps_local_commit() {
   local r; r=$(remote a)
@@ -282,6 +296,45 @@ test_autostash_conflict_is_reported_not_success() {
   ! grep -q "up to date" <<<"$OUT"
   sync; expect_rc 0
   expect_todo git-sync:a:conflict
+}
+test_conflicting_outside_edit_with_local_commit() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  echo mine >"$(local_dir a)/bob@team/r.md"
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  push_from_other "$r" bob@team/r.md upstream
+  sync; expect_rc 0
+  expect_todo git-sync:a:conflict
+  [ "$(remote_file "$r" bob@team/r.md)" = upstream ]
+  local kept=0
+  grep -q mine "$(local_dir a)/bob@team/r.md" 2>/dev/null && kept=1
+  [ -n "$(git -C "$(local_dir a)" stash list)" ] && kept=1
+  [ "$kept" = 1 ] || fail "local edit to bob@team/r.md was lost (not in working tree or stash)"
+  [ ! -d "$(local_dir a)/.git/rebase-merge" ]
+  [ ! -d "$(local_dir a)/.git/rebase-apply" ]
+}
+test_stuck_rebase_without_conflict_is_a_real_failure() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  git -C "$(local_dir a)" add -A
+  git -C "$(local_dir a)" commit -qm "manual: mine"
+  push_from_other "$r" bob@team/new.md fresh
+  # Force the rebase sequencer's internal re-commit to fail for a reason that
+  # has nothing to do with content conflicts (a broken signing config), so
+  # git leaves .git/rebase-merge behind with a clean index (no unmerged
+  # paths) -- the same shape the old "Committer identity unknown" bug left.
+  git -C "$(local_dir a)" config commit.gpgsign true
+  git -C "$(local_dir a)" config gpg.program /nonexistent-gpg-binary-xyz
+  sync; expect_rc 0
+  expect_out "a: failed"
+  [ -z "$(json_lines | jq -r 'select(has("todo")) | select(.todo.key == "git-sync:a:conflict")')" ]
+  [ "$(git -C "$(local_dir a)" log -1 --format=%s)" = "manual: mine" ]
+  [ "$(remote_file "$r" bob@team/new.md)" = fresh ]
+  [ ! -d "$(local_dir a)/.git/rebase-merge" ]
+  [ ! -d "$(local_dir a)/.git/rebase-apply" ]
 }
 test_hold_skips_folder() {
   local r; r=$(remote a)
