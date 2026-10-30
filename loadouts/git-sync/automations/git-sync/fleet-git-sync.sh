@@ -31,8 +31,8 @@ die() { printf 'git-sync: %s\n' "$*" >&2; exit 1; }
 last_err() { { grep -E '^(fatal|error|remote): ' "$ERR" || grep -v '^hint:' "$ERR"; } | tail -n 1 | cut -c1-300; }
 g() { local d=$1; shift; git -C "$d" "${safe[@]}" "$@"; }
 net() { # dir args…: a network git call, bounded so the run can always print its state
-  local d=$1 t=$((DEADLINE + 30 - SECONDS)) rc; shift
-  [ "$t" -le 60 ] || t=60; [ "$t" -ge 1 ] || t=1
+  local d=$1 t=$((DEADLINE + 30 - SECONDS)) rc cap=${NET_CAP:-60}; shift
+  [ "$t" -le "$cap" ] || t=$cap; [ "$t" -ge 1 ] || t=1
   timeout -k 5 "$t" git -C "$d" "${safe[@]}" "${netc[@]}" "$@"; rc=$?
   [ "$rc" -ne 124 ] || echo "fatal: timed out after ${t}s" >&2
   return "$rc"
@@ -134,7 +134,7 @@ clone_folder() { # name remote branch
     say "$name: $dir exists and is not a git clone; skipped"
     return
   fi
-  if net "$ROOT" clone -q --branch "$branch" -- "$remote" "$dir" 2>"$ERR"; then
+  if NET_CAP=$((DEADLINE + 30)) net "$ROOT" clone -q --branch "$branch" -- "$remote" "$dir" 2>"$ERR"; then
     g "$dir" config core.autocrlf false
     g "$dir" config core.fileMode false
     g "$dir" config core.untrackedCache false
@@ -196,7 +196,9 @@ pull_rebase() { # name dir → 0 ok; 1 conflict or failure (already reported)
 }
 
 outside_commits_ok() { # name dir → 0 ok to push; 1 blocked (todo raised)
-  local paths; paths=$(g "$2" diff --name-only '@{u}' HEAD -- . ":(exclude)$AUTHOR" 2>/dev/null | head -n 20)
+  # Per-commit, not a tree diff: an add-then-revert of an outside path still shows up here,
+  # so forged commits that cancel out in the tree can't sneak past this check.
+  local paths; paths=$(g "$2" log --format= --name-only '@{u}..HEAD' -- . ":(exclude)$AUTHOR" 2>/dev/null | sort -u | head -n 20)
   [ -z "$paths" ] && return 0
   todo "git-sync:$1:outside-commits" "git-sync: commit(s) outside $AUTHOR/ in $1" \
     "HEAD has local commit(s) touching paths outside $AUTHOR/ (someone else committed in this clone), so nothing is pushed:"$'\n'"$paths"$'\n'"Drop them with: git -C $2 reset --soft @{u}, then review before re-adding your own changes."

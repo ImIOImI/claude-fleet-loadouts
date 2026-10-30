@@ -148,6 +148,16 @@ test_clones_missing_folder() {
   [ "$(git -C "$(local_dir a)" config core.fileMode)" = false ]
   expect_out "a: cloned"
 }
+test_clone_uses_full_run_budget() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  export GIT_SYNC_DEADLINE=500
+  shim timeout "case \" \$* \" in *' clone '*) echo \"\$3\" >'$T/clone-timeout' ;; esac"
+  shim_sync; expect_rc 0
+  expect_out "a: cloned"
+  [ -f "$T/clone-timeout" ] || fail "timeout was never shimmed for the clone"
+  [ "$(cat "$T/clone-timeout")" -gt 60 ] || fail "clone timeout was capped at $(cat "$T/clone-timeout")s, not given the full run budget"
+}
 test_refuses_non_git_directory() {
   local r; r=$(remote a)
   mkdir -p "$(local_dir a)"; echo keep >"$(local_dir a)/notes"
@@ -256,6 +266,21 @@ test_outside_commit_is_never_pushed() {
   expect_todo git-sync:a:outside-commits
   [ "$(remote_file "$r" bob@team/r.md)" = review ]
   [ -z "$(remote_file "$r" alice@team/x.md)" ]
+}
+test_reverted_outside_commit_is_never_pushed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  ( cd "$(local_dir a)" && mkdir -p .github && echo evil >.github/w.yml && git add -A &&
+    git -c user.name=mallory -c user.email=m@x commit -qm add &&
+    git -c user.name=mallory -c user.email=m@x rm -q .github/w.yml &&
+    git -c user.name=mallory -c user.email=m@x commit -qm rm )
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  expect_todo git-sync:a:outside-commits
+  [ -z "$(remote_file "$r" alice@team/x.md)" ]
+  git --git-dir="$r" log --format=%an main | grep -qx mallory && fail "mallory's reverted commit still reached the remote"
+  true
 }
 test_autosync_unscoped_stages_everything() {
   local r; r=$(remote a)
