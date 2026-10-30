@@ -17,7 +17,7 @@ setup() {
   export GIT_SYNC_ROOT="$T/shared" GIT_SYNC_CONF="$T/shared/.git-sync.d"
   mkdir -p "$GIT_SYNC_CONF"
   export FLEET_NODE_ID=alice@team FLEET_STATE='{}'
-  unset GH_TOKEN GIT_SYNC_HOLD_MAX_AGE
+  unset GH_TOKEN GIT_SYNC_HOLD_MAX_AGE GIT_SYNC_DEADLINE GIT_SYNC_MAX_FILE_BYTES
 }
 
 # A bare repo seeded with README and bob@team/r.md; prints its path.
@@ -67,6 +67,15 @@ expect_todo() { json_lines | jq -r 'select(has("todo")) | .todo.key' | grep -qx 
 notify_keys() { json_lines | jq -r 'select(has("notify")) | .notify.key'; }
 remote_file() { git --git-dir="$1" show "main:$2" 2>/dev/null || true; }
 local_dir() { echo "$GIT_SYNC_ROOT/$1"; }
+todo_keys() { json_lines | jq -r 'select(has("todo")) | .todo.key'; }
+todo_body() { json_lines | jq -r --arg k "$1" 'select(has("todo")) | .todo | select(.key == $k) | .body'; }
+# shim <cmd> <bash>: a PATH wrapper that runs <bash> (with $REAL = the real command) then execs it.
+shim() {
+  mkdir -p "$T/bin"
+  printf '#!/usr/bin/env bash\nREAL=%q\n%s\nexec "$REAL" "$@"\n' "$(command -v "$1")" "$2" >"$T/bin/$1"
+  chmod +x "$T/bin/$1"
+}
+shim_sync() { PATH="$T/bin:$PATH" sync; }
 
 # ── config ────────────────────────────────────────────────────────────────
 test_no_config_exits_10() {
@@ -81,7 +90,7 @@ test_bad_mode_exits_2_and_touches_nothing() {
   local r; r=$(remote a)
   conf a.json a "$r" sideways
   sync; expect_rc 2
-  grep -q "mode must be auto-sync or mirror" "$T/stderr"
+  grep -q "a.json: folder a: mode must be auto-sync or mirror" "$T/stderr"
   [ ! -e "$(local_dir a)" ]
 }
 test_duplicate_name_across_files_exits_2() {
@@ -101,6 +110,27 @@ test_bad_folder_name_exits_2() {
   conf a.json ../escape "$r" mirror
   sync; expect_rc 2
   grep -q "bad folder name" "$T/stderr"
+}
+test_empty_branch_exits_2() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror '{"branch": ""}'
+  sync; expect_rc 2
+  grep -q "a.json: folder a: branch must be a non-empty string" "$T/stderr"
+  [ ! -e "$(local_dir a)" ]
+}
+test_string_author_scoped_exits_2() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync '{"author_scoped": "false"}'
+  sync; expect_rc 2
+  grep -q "a.json: folder a: author_scoped must be true or false" "$T/stderr"
+}
+test_confd_files_merge() {
+  local ra rb; ra=$(remote a); rb=$(remote b)
+  conf 1.json a "$ra" mirror
+  conf 2.json b "$rb" mirror
+  sync; expect_rc 0
+  [ -f "$(local_dir a)/README" ]
+  [ -f "$(local_dir b)/README" ]
 }
 test_non_object_folder_entry_exits_2() {
   echo '{"folders":["x"]}' >"$GIT_SYNC_CONF/a.json"
@@ -245,17 +275,13 @@ test_push_race_is_retried_once() {
   local r; r=$(remote a)
   conf a.json a "$r" auto-sync
   sync
-  cat >"$(local_dir a)/.git/hooks/pre-push" <<EOF
-#!/bin/sh
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-export GIT_CONFIG_GLOBAL="$T/gitconfig"
-[ -e "$T/raced" ] && exit 0
-touch "$T/raced"
-git clone -q "$r" "$T/race" && cd "$T/race" && echo racer >racer.md && git add -A && git commit -qm race && git push -q origin main
-EOF
-  chmod +x "$(local_dir a)/.git/hooks/pre-push"
+  # The first push of the run lets another clone push first, so it is rejected.
+  shim git "case \" \$* \" in *' push '*) [ -e '$T/raced' ] || { touch '$T/raced'
+    ( \"\$REAL\" clone -q '$r' '$T/race' && cd '$T/race' && echo racer >racer.md && \"\$REAL\" add -A &&
+      \"\$REAL\" -c user.name=r -c user.email=r@x commit -qm race && \"\$REAL\" push -q origin main ) >/dev/null 2>&1; } ;; esac"
   mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
-  sync; expect_rc 0
+  shim_sync; expect_rc 0
+  [ -e "$T/raced" ]
   [ "$(remote_file "$r" alice@team/x.md)" = mine ]
   [ "$(remote_file "$r" racer.md)" = racer ]
 }
@@ -292,8 +318,8 @@ test_autostash_conflict_is_reported_not_success() {
   push_from_other "$r" bob@team/r.md upstream
   sync; expect_rc 0
   expect_todo git-sync:a:conflict
-  ! grep -q "a: pushed" <<<"$OUT"
-  ! grep -q "up to date" <<<"$OUT"
+  grep -q "a: pushed" <<<"$OUT" && fail "pushed despite the conflict"
+  grep -q "up to date" <<<"$OUT" && fail "reported up to date despite the conflict"
   sync; expect_rc 0
   expect_todo git-sync:a:conflict
 }
@@ -307,10 +333,8 @@ test_conflicting_outside_edit_with_local_commit() {
   sync; expect_rc 0
   expect_todo git-sync:a:conflict
   [ "$(remote_file "$r" bob@team/r.md)" = upstream ]
-  local kept=0
-  grep -q mine "$(local_dir a)/bob@team/r.md" 2>/dev/null && kept=1
-  [ -n "$(git -C "$(local_dir a)" stash list)" ] && kept=1
-  [ "$kept" = 1 ] || fail "local edit to bob@team/r.md was lost (not in working tree or stash)"
+  git -C "$(local_dir a)" stash show -p | grep -qx '+mine' \
+    || fail "local edit to bob@team/r.md is not in git stash list"
   [ ! -d "$(local_dir a)/.git/rebase-merge" ]
   [ ! -d "$(local_dir a)/.git/rebase-apply" ]
 }
@@ -326,8 +350,9 @@ test_stuck_rebase_without_conflict_is_a_real_failure() {
   # has nothing to do with content conflicts (a broken signing config), so
   # git leaves .git/rebase-merge behind with a clean index (no unmerged
   # paths) -- the same shape the old "Committer identity unknown" bug left.
-  git -C "$(local_dir a)" config commit.gpgsign true
-  git -C "$(local_dir a)" config gpg.program /nonexistent-gpg-binary-xyz
+  # (in the script's global config: a clone's own .git/config may not set these)
+  git config --file "$T/script-gitconfig" commit.gpgsign true
+  git config --file "$T/script-gitconfig" gpg.program /nonexistent-gpg-binary-xyz
   sync; expect_rc 0
   expect_out "a: failed"
   [ -z "$(json_lines | jq -r 'select(has("todo")) | select(.todo.key == "git-sync:a:conflict")')" ]
@@ -377,8 +402,9 @@ test_failures_notify_on_third_and_reset() {
 test_concurrent_run_exits_10() {
   local r; r=$(remote a)
   conf a.json a "$r" mirror
-  flock "$GIT_SYNC_ROOT/.git-sync.lock" sleep 3 &
-  sleep 0.5
+  local lock="$GIT_SYNC_ROOT/.git-sync.lock" i
+  flock "$lock" sleep 5 &
+  for i in $(seq 100); do flock -n "$lock" true || break; sleep 0.05; done
   sync; expect_rc 10
   [ ! -e "$(local_dir a)" ]
   wait
@@ -401,6 +427,214 @@ test_gh_token_never_written_to_disk() {
   sync
   expect_rc 0
   [ -z "$(grep -rl tok-must-not-hit-disk "$GIT_SYNC_ROOT" "$r" || true)" ]
+}
+# ── untrusted clones (anyone who can write /shared can edit .git) ─────────
+test_planted_fsmonitor_is_refused_and_never_runs() {
+  export GH_TOKEN=secret-tok
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  git -C "$(local_dir a)" config core.fsmonitor "echo \$GH_TOKEN >$T/stolen; false"
+  push_from_other "$r" new.md fresh
+  sync; expect_rc 0
+  expect_todo git-sync:a:unsafe-config
+  [ ! -e "$T/stolen" ] || fail "fsmonitor ran"
+  [ ! -e "$(local_dir a)/new.md" ]
+  todo_body git-sync:a:unsafe-config | grep -qx core.fsmonitor
+  todo_body git-sync:a:unsafe-config | grep -q stolen && fail "todo leaks the config value"
+  [ -z "$(json_lines | jq -r 'select(has("state")) | .state.failures.a // empty')" ]
+}
+test_planted_hooks_never_run() {
+  local r rm h d; r=$(remote a); rm=$(remote m)
+  conf a.json a "$r" auto-sync
+  conf m.json m "$rm" mirror
+  sync
+  for d in "$(local_dir a)" "$(local_dir m)"; do
+    for h in post-merge post-checkout pre-commit post-commit pre-push reference-transaction post-rewrite pre-rebase pre-auto-gc; do
+      printf '#!/bin/sh\ntouch %s/hook-%s\n' "$T" "$h" >"$d/.git/hooks/$h"
+      chmod +x "$d/.git/hooks/$h"
+    done
+  done
+  push_from_other "$r" bob@team/new.md fresh
+  push_from_other "$rm" new.md fresh
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  [ "$(remote_file "$r" alice@team/x.md)" = mine ]
+  grep -qx fresh "$(local_dir a)/bob@team/new.md"
+  grep -qx fresh "$(local_dir m)/new.md"
+  [ -z "$(ls "$T"/hook-* 2>/dev/null)" ] || fail "hooks ran: $(ls "$T"/hook-*)"
+}
+test_include_path_is_refused() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  printf '[core]\n\tfsmonitor = "touch %s/pwned; false"\n' "$T" >"$T/evil.cfg"
+  git -C "$(local_dir a)" config include.path "$T/evil.cfg"
+  push_from_other "$r" new.md fresh
+  sync; expect_rc 0
+  expect_todo git-sync:a:unsafe-config
+  [ ! -e "$T/pwned" ]
+  [ ! -e "$(local_dir a)/new.md" ]
+}
+test_changed_origin_url_is_refused() {
+  local r r2; r=$(remote a); r2=$(remote evil)
+  conf a.json a "$r" auto-sync
+  sync
+  git -C "$(local_dir a)" remote set-url origin "$r2"
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  expect_todo git-sync:a:remote-changed
+  [ -z "$(remote_file "$r2" alice@team/x.md)" ]
+}
+test_config_remote_change_raises_remote_changed() {
+  local r r2; r=$(remote a); r2=$(remote b)
+  conf a.json a "$r" mirror
+  sync
+  conf a.json a "$r2" mirror
+  push_from_other "$r2" new.md fresh
+  sync; expect_rc 0
+  expect_todo git-sync:a:remote-changed
+  [ ! -e "$(local_dir a)/new.md" ]
+  [ "$(git -C "$(local_dir a)" remote get-url origin)" = "$r" ]
+}
+test_config_branch_change_raises_remote_changed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  conf a.json a "$r" mirror '{"branch": "dev"}'
+  sync; expect_rc 0
+  expect_todo git-sync:a:remote-changed
+}
+
+# ── todo dedupe, state pruning, deadline ──────────────────────────────────
+test_persistent_todo_is_emitted_once() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync; next_state
+  echo changed >"$(local_dir a)/bob@team/r.md"
+  sync; next_state; expect_todo git-sync:a:outside-edits
+  sync; next_state; expect_rc 10
+  [ -z "$(todo_keys)" ] || fail "re-emitted: $(todo_keys)"
+  echo more >"$(local_dir a)/bob@team/new.md"
+  sync; next_state; expect_todo git-sync:a:outside-edits
+  git -C "$(local_dir a)" checkout -q -- bob@team/r.md; rm "$(local_dir a)/bob@team/new.md"
+  sync; next_state
+  [ "$(jq -c '.seen' <<<"$FLEET_STATE")" = '{}' ]
+  echo changed >"$(local_dir a)/bob@team/r.md"
+  sync; next_state; expect_todo git-sync:a:outside-edits
+}
+test_state_is_pruned_to_configured_folders() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  export FLEET_STATE='{"failures":{"gone":2},"seen":{"git-sync:gone:conflict":"1","git-sync:node-id":"2"}}'
+  sync; next_state
+  [ "$(jq -c '[.failures, .seen]' <<<"$FLEET_STATE")" = '[{},{}]' ]
+}
+test_deadline_defers_and_rotates() {
+  local ra rb rc; ra=$(remote a); rb=$(remote b); rc=$(remote c)
+  jq -n --arg a "$ra" --arg b "$rb" --arg c "$rc" \
+    '{folders: [{name: "a", remote: $a}, {name: "b", remote: $b}, {name: "c", remote: $c}]}' >"$GIT_SYNC_CONF/x.json"
+  export GIT_SYNC_DEADLINE=0
+  sync; next_state; expect_out "a: cloned"; expect_out "deferred to the next run: b c"
+  [ ! -e "$(local_dir b)" ]
+  sync; next_state; expect_out "b: cloned"; expect_out "deferred to the next run: c a"
+  sync; next_state; expect_out "c: cloned"
+}
+test_hung_remote_times_out_and_state_is_printed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  shim git "case \" \$* \" in *' fetch '*) exec sleep 30 ;; esac"
+  export GIT_SYNC_DEADLINE=-28 # leaves ~2 s for each network call
+  shim_sync; expect_rc 0
+  expect_out "timed out"
+  next_state
+  [ "$(jq -r '.failures.a' <<<"$FLEET_STATE")" = 1 ]
+}
+test_failure_reports_the_error_line() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  mv "$r" "$r.away"
+  sync; expect_rc 0
+  expect_out "fetch: fatal: "
+  grep -q "repository exists" <<<"$OUT" && fail "reported prose, not the error: $OUT"
+  true
+}
+test_failing_renotifies_daily() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  mv "$r" "$r.away"
+  export FLEET_STATE='{"failures":{"a":289}}'
+  sync; next_state; [ -z "$(notify_keys)" ]
+  sync; next_state; [ "$(notify_keys)" = git-sync:a:failing ]
+}
+
+# ── auto-sync edge cases ──────────────────────────────────────────────────
+test_large_file_stays_local() {
+  export GIT_SYNC_MAX_FILE_BYTES=100
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  mkdir -p "$(local_dir a)/alice@team"; echo small >"$(local_dir a)/alice@team/s.md"
+  head -c 200 /dev/zero >"$(local_dir a)/alice@team/big.bin"
+  sync; expect_rc 0
+  expect_todo git-sync:a:large-file
+  todo_body git-sync:a:large-file | grep -qx alice@team/big.bin
+  [ "$(remote_file "$r" alice@team/s.md)" = small ]
+  [ -z "$(git --git-dir="$r" ls-tree -r --name-only main | grep big.bin || true)" ]
+  [ "$(git -C "$(local_dir a)" status --porcelain -- alice@team/big.bin)" = "?? alice@team/big.bin" ]
+}
+test_deleting_own_folder_is_pushed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; [ "$(remote_file "$r" alice@team/x.md)" = mine ]
+  rm -rf "$(local_dir a)/alice@team"
+  sync; expect_rc 0
+  [ -z "$(remote_file "$r" alice@team/x.md)" ]
+}
+test_hold_vanishing_mid_check_is_safe() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  mkdir -p "$(local_dir a)/alice@team"; touch "$(local_dir a)/alice@team/.sync-hold"
+  shim stat "case \"\$*\" in *.sync-hold*) exit 1 ;; esac" # deleted between -e and stat
+  shim_sync; expect_rc 10
+  expect_out "held"
+  json_lines | jq -e 'select(has("state"))' >/dev/null
+}
+test_stale_index_lock_is_removed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  touch -d '20 minutes ago' "$(local_dir a)/.git/index.lock"
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  expect_out "stale .git/index.lock"
+  [ "$(remote_file "$r" alice@team/x.md)" = mine ]
+}
+test_lock_error_exits_1() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  mkdir -p "$GIT_SYNC_ROOT/.git-sync.lock"
+  sync; expect_rc 1
+  grep -q "git-sync.lock" "$T/stderr"
+}
+test_gh_token_reaches_git_credential_fill() {
+  export GH_TOKEN=tok-123
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  shim git "case \" \$* \" in *' clone '*)
+    printf 'protocol=https\nhost=github.com\n\n' | \"\$REAL\" credential fill >'$T/cred' 2>&1
+    printf 'protocol=https\nhost=example.com\n\n' | \"\$REAL\" credential fill >'$T/cred-other' 2>&1 ;; esac"
+  shim_sync; expect_rc 0
+  grep -qx username=x-access-token "$T/cred"
+  grep -qx password=tok-123 "$T/cred"
+  grep -q tok-123 "$T/cred-other" && fail "token offered to a non-github host"
+  true
 }
 test_script_fits_inline_limit() {
   [ "$(wc -c <"$SCRIPT")" -lt 20000 ]
