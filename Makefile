@@ -1,6 +1,6 @@
 # Convenience targets around scripts/. Override the registry destination with
 # env vars, e.g.  make publish OWNER=imioimi REGISTRY=ghcr.io
-.PHONY: dry-run publish publish-one
+.PHONY: dry-run publish publish-one test
 
 # Validate + preview every loadout without pushing.
 dry-run:
@@ -14,3 +14,8 @@ publish:
 publish-one:
 	@test -n "$(DIR)" || { echo "usage: make publish-one DIR=loadouts/<id>" >&2; exit 1; }
 	./scripts/publish-loadout.sh "$(DIR)"
+
+# Run every repo test (no registry access needed).
+test:
+	./scripts/build-index.test.sh
+	./tests/git-sync/run.sh
