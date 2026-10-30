@@ -33,6 +33,12 @@ notify() { # key title body
 upstream() { git -C "$1" rev-parse -q --verify '@{u}' 2>/dev/null || true; }
 count() { git -C "$1" rev-list --count "$2" 2>/dev/null || echo 0; }
 rebase_in_progress() { [ -d "$1/.git/rebase-merge" ] || [ -d "$1/.git/rebase-apply" ]; }
+unmerged_paths() { git -C "$1" diff --name-only --diff-filter=U 2>/dev/null; }
+stash_conflict_todo() { # name dir
+  todo "git-sync:$1:conflict" "git-sync: conflict in $1" \
+    "Local edits conflicted with the remote while reapplying the autostash. They are preserved in \`git stash list\` inside $2 (not lost). Resolve with: cd $2 && git status (fix the conflicted files), then git add -A && git stash drop."
+  say "$1: conflict; local edits are in git stash list"
+}
 
 # GH_TOKEN reaches git through run-scoped env config only; nothing is written to disk.
 if [ -n "${GH_TOKEN:-}" ]; then
@@ -52,8 +58,8 @@ shopt -s nullglob
 files=("$CONF"/*.json)
 if [ ${#files[@]} -eq 0 ]; then say "no git-sync config in $CONF"; exit 10; fi
 for f in "${files[@]}"; do
-  jq -e 'type == "object" and ((.folders // []) | type == "array")' "$f" >/dev/null 2>&1 \
-    || config_error "$f: expected a JSON object with a \"folders\" array"
+  jq -e 'type == "object" and ((.folders // []) | type == "array") and all(.folders[]?; type == "object")' "$f" >/dev/null 2>&1 \
+    || config_error "$f: expected a JSON object with a \"folders\" array of objects"
 done
 folders=$(jq -cs '[.[] | (.folders // [])[]]' "${files[@]}")
 errors=$(jq -r '
@@ -63,7 +69,7 @@ errors=$(jq -r '
   (.[] | select((.mode // "mirror") | IN("auto-sync", "mirror") | not)
        | "folder \(.name): mode must be auto-sync or mirror, got \(.mode | tostring)"),
   (group_by(.name | tostring)[] | select(length > 1) | "duplicate folder name: \(.[0].name)")
-' <<<"$folders")
+' <<<"$folders") || config_error "could not validate folder config"
 [ -z "$errors" ] || config_error "$errors"
 
 if [ -n "$AUTHOR" ] && ! [[ "$AUTHOR" =~ ^[a-z0-9-]+@[a-z0-9-]+$ ]]; then
@@ -74,13 +80,15 @@ fi
 # ── failure counters (state carried between runs) ──
 state_in=${FLEET_STATE:-}
 [ -n "$state_in" ] || state_in='{}'
-failures=$(jq -c 'if type == "object" and (.failures | type) == "object" then .failures else {} end' <<<"$state_in" 2>/dev/null)
+failures=$(jq -c 'if type == "object" and (.failures | type) == "object"
+  then (.failures | with_entries(select(.value | type == "number")))
+  else {} end' <<<"$state_in" 2>/dev/null)
 [ -n "$failures" ] || failures='{}'
 
 record_failure() { # name message
   local n
   reported=1
-  n=$(jq -r --arg k "$1" '(.[$k] // 0) + 1' <<<"$failures")
+  n=$(jq -r --arg k "$1" '((.[$k] | numbers) // 0) + 1' <<<"$failures")
   failures=$(jq -c --arg k "$1" --argjson n "$n" '.[$k] = $n' <<<"$failures")
   say "$1: failed ($n in a row): $2"
   if [ "$n" -eq "$NOTIFY_AFTER" ]; then
@@ -99,7 +107,7 @@ clone_folder() { # name remote branch
     say "$name: $dir exists and is not a git clone; skipped"
     return
   fi
-  if git clone -q --branch "$branch" "$remote" "$dir" 2>"$ERR"; then
+  if git clone -q --branch "$branch" -- "$remote" "$dir" 2>"$ERR"; then
     git -C "$dir" config core.autocrlf false
     git -C "$dir" config core.fileMode false
     git -C "$dir" config core.untrackedCache false
@@ -112,7 +120,10 @@ clone_folder() { # name remote branch
 }
 
 pull_rebase() { # name dir → 0 ok; 1 conflict or failure (already reported)
-  if git -C "$2" pull -q --rebase --autostash 2>"$ERR"; then return 0; fi
+  if git -C "$2" -c gc.autoDetach=false pull -q --rebase --autostash 2>"$ERR"; then
+    if [ -n "$(unmerged_paths "$2")" ]; then stash_conflict_todo "$1" "$2"; return 1; fi
+    return 0
+  fi
   if rebase_in_progress "$2"; then
     git -C "$2" rebase --abort 2>/dev/null
     todo "git-sync:$1:conflict" "git-sync: rebase conflict in $1" \
@@ -126,6 +137,7 @@ pull_rebase() { # name dir → 0 ok; 1 conflict or failure (already reported)
 
 sync_auto() { # name scoped
   local name=$1 scoped=$2 dir="$ROOT/$1" scope hold n up_before up_mid pulled ahead outside
+  if [ -n "$(unmerged_paths "$dir")" ]; then stash_conflict_todo "$name" "$dir"; return; fi
   if [ -z "$AUTHOR" ]; then need_node_id=1; say "$name: skipped (FLEET_NODE_ID is not set)"; return; fi
   if [ "$scoped" = true ]; then scope="$AUTHOR"; hold="$dir/$AUTHOR/.sync-hold"; else scope="."; hold="$dir/.sync-hold"; fi
   if [ -e "$hold" ]; then
@@ -144,14 +156,19 @@ sync_auto() { # name scoped
     fi
   fi
   if [ "$scope" = . ] || [ -e "$dir/$scope" ]; then
-    git -C "$dir" add -A -- "$scope" ':(exclude,glob)**/.sync-hold'
+    git -C "$dir" add -A -- "$scope" ':(exclude,glob)**/.sync-hold' 2>"$ERR" \
+      || { record_failure "$name" "add: $(last_err)"; return; }
   fi
-  n=$(git -C "$dir" diff --cached --name-only | wc -l | tr -d ' ')
+  n=$(git -C "$dir" diff --cached --name-only -- "$scope" | wc -l | tr -d ' ')
   if [ "$n" -gt 0 ]; then
     git -C "$dir" -c user.name="$AUTHOR" -c user.email="$AUTHOR@fleet.invalid" \
-      commit -q -m "sync: $n files from $AUTHOR"
+      commit -q -m "sync: $n files from $AUTHOR" -- "$scope" 2>"$ERR" || { record_failure "$name" "commit: $(last_err)"; return; }
   fi
   up_before=$(upstream "$dir")
+  if [ -z "$up_before" ]; then
+    record_failure "$name" "no upstream branch for $(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null)"
+    return
+  fi
   pull_rebase "$name" "$dir" || return
   up_mid=$(upstream "$dir")
   pulled=0
@@ -176,6 +193,7 @@ sync_auto() { # name scoped
 
 sync_mirror() { # name
   local name=$1 dir="$ROOT/$1" dirty ahead behind
+  if [ -n "$(unmerged_paths "$dir")" ]; then stash_conflict_todo "$name" "$dir"; return; fi
   dirty=$(git -C "$dir" status --porcelain | head -n 20)
   if [ -n "$dirty" ]; then
     todo "git-sync:$name:local-edits" "git-sync: local edits in mirror $name" \
@@ -183,7 +201,11 @@ sync_mirror() { # name
     say "$name: local edits in a mirror; skipped"
     return
   fi
-  if ! git -C "$dir" fetch -q 2>"$ERR"; then record_failure "$name" "fetch: $(last_err)"; return; fi
+  if ! git -C "$dir" -c gc.autoDetach=false fetch -q 2>"$ERR"; then record_failure "$name" "fetch: $(last_err)"; return; fi
+  if [ -z "$(upstream "$dir")" ]; then
+    record_failure "$name" "no upstream branch for $(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null)"
+    return
+  fi
   ahead=$(count "$dir" '@{u}..HEAD')
   if [ "$ahead" -gt 0 ]; then
     todo "git-sync:$name:local-edits" "git-sync: local commits in mirror $name" \
@@ -193,7 +215,7 @@ sync_mirror() { # name
   fi
   behind=$(count "$dir" 'HEAD..@{u}')
   if [ "$behind" -gt 0 ]; then
-    if ! git -C "$dir" merge -q --ff-only '@{u}' 2>"$ERR"; then record_failure "$name" "merge: $(last_err)"; return; fi
+    if ! git -C "$dir" -c gc.autoDetach=false merge -q --ff-only '@{u}' 2>"$ERR"; then record_failure "$name" "merge: $(last_err)"; return; fi
     changed=1
     say "$name: pulled $behind commit(s)"
   else
@@ -203,11 +225,15 @@ sync_mirror() { # name
 }
 
 # ── main ──
-while IFS=$'\t' read -r -u 3 name remote branch mode scoped; do
-  if [ ! -d "$ROOT/$name/.git" ]; then clone_folder "$name" "$remote" "$branch"; continue; fi
-  if [ "$mode" = auto-sync ]; then sync_auto "$name" "$scoped"; else sync_mirror "$name"; fi
-done 3< <(jq -r '.[] | [.name, .remote, (.branch // "main"), (.mode // "mirror"),
-                        ((if .author_scoped == false then false else true end) | tostring)] | @tsv' <<<"$folders")
+tsv=$(jq -r '.[] | [.name, .remote, (.branch // "main"), (.mode // "mirror"),
+                     ((if .author_scoped == false then false else true end) | tostring)] | @tsv' <<<"$folders") \
+  || config_error "could not build folder list"
+if [ -n "$tsv" ]; then
+  while IFS=$'\t' read -r -u 3 name remote branch mode scoped; do
+    if [ ! -d "$ROOT/$name/.git" ]; then clone_folder "$name" "$remote" "$branch"; continue; fi
+    if [ "$mode" = auto-sync ]; then sync_auto "$name" "$scoped"; else sync_mirror "$name"; fi
+  done 3<<<"$tsv"
+fi
 
 if [ "$need_node_id" = 1 ]; then
   todo "git-sync:node-id" "git-sync: set FLEET_NODE_ID to sync auto-sync folders" \

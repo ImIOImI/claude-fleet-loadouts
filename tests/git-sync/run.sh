@@ -101,6 +101,11 @@ test_bad_folder_name_exits_2() {
   sync; expect_rc 2
   grep -q "bad folder name" "$T/stderr"
 }
+test_non_object_folder_entry_exits_2() {
+  echo '{"folders":["x"]}' >"$GIT_SYNC_CONF/a.json"
+  sync; expect_rc 2
+  [ ! -e "$(local_dir x)" ]
+}
 
 # ── clone ─────────────────────────────────────────────────────────────────
 test_clones_missing_folder() {
@@ -197,6 +202,18 @@ test_autosync_keeps_outside_edits_local() {
   [ "$(remote_file "$r" bob@team/r.md)" = review ]
   grep -qx changed "$(local_dir a)/bob@team/r.md"
 }
+test_autosync_never_commits_prestaged_outside_files() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  echo changed >"$(local_dir a)/bob@team/r.md"
+  git -C "$(local_dir a)" add bob@team/r.md
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  [ "$(remote_file "$r" alice@team/x.md)" = mine ]
+  [ "$(remote_file "$r" bob@team/r.md)" = review ]
+  expect_todo git-sync:a:outside-edits
+}
 test_autosync_unscoped_stages_everything() {
   local r; r=$(remote a)
   conf a.json a "$r" auto-sync '{"author_scoped": false}'
@@ -253,6 +270,19 @@ test_rebase_conflict_keeps_local_commit() {
   [ ! -d "$(local_dir a)/.git/rebase-merge" ]
   [ ! -d "$(local_dir a)/.git/rebase-apply" ]
 }
+test_autostash_conflict_is_reported_not_success() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  echo mine >"$(local_dir a)/bob@team/r.md"
+  push_from_other "$r" bob@team/r.md upstream
+  sync; expect_rc 0
+  expect_todo git-sync:a:conflict
+  ! grep -q "a: pushed" <<<"$OUT"
+  ! grep -q "up to date" <<<"$OUT"
+  sync; expect_rc 0
+  expect_todo git-sync:a:conflict
+}
 test_hold_skips_folder() {
   local r; r=$(remote a)
   conf a.json a "$r" auto-sync
@@ -299,6 +329,14 @@ test_concurrent_run_exits_10() {
   sync; expect_rc 10
   [ ! -e "$(local_dir a)" ]
   wait
+}
+test_missing_upstream_is_a_failure() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  git -C "$(local_dir a)" branch --unset-upstream
+  sync
+  expect_out "failed"
 }
 test_gh_token_never_written_to_disk() {
   export GH_TOKEN=tok-must-not-hit-disk
