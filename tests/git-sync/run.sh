@@ -305,8 +305,10 @@ test_gh_token_never_written_to_disk() {
   local r; r=$(remote a)
   conf a.json a "$r" auto-sync
   sync
+  expect_rc 0
   mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
   sync
+  expect_rc 0
   [ -z "$(grep -rl tok-must-not-hit-disk "$GIT_SYNC_ROOT" "$r" || true)" ]
 }
 test_script_fits_inline_limit() {
