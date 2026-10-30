@@ -245,6 +245,18 @@ test_autosync_never_commits_prestaged_outside_files() {
   [ "$(remote_file "$r" bob@team/r.md)" = review ]
   expect_todo git-sync:a:outside-edits
 }
+test_outside_commit_is_never_pushed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" auto-sync
+  sync
+  ( cd "$(local_dir a)" && echo HACK >bob@team/r.md &&
+    git -c user.name=mallory -c user.email=m@x commit -qam inject )
+  mkdir -p "$(local_dir a)/alice@team"; echo mine >"$(local_dir a)/alice@team/x.md"
+  sync; expect_rc 0
+  expect_todo git-sync:a:outside-commits
+  [ "$(remote_file "$r" bob@team/r.md)" = review ]
+  [ -z "$(remote_file "$r" alice@team/x.md)" ]
+}
 test_autosync_unscoped_stages_everything() {
   local r; r=$(remote a)
   conf a.json a "$r" auto-sync '{"author_scoped": false}'
@@ -505,6 +517,28 @@ test_config_branch_change_raises_remote_changed() {
   sync; expect_rc 0
   expect_todo git-sync:a:remote-changed
 }
+test_user_identity_config_is_allowed() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  git -C "$(local_dir a)" config user.name "Someone"
+  git -C "$(local_dir a)" config user.email x@y
+  push_from_other "$r" new.md fresh
+  sync; expect_rc 0
+  expect_out "a: pulled 1 commit(s)"
+  [ -z "$(json_lines | jq -r 'select(has("todo")) | select(.todo.key == "git-sync:a:unsafe-config")')" ]
+}
+test_detached_head_gets_gentle_todo() {
+  local r; r=$(remote a)
+  conf a.json a "$r" mirror
+  sync
+  git -C "$(local_dir a)" checkout -q --detach HEAD
+  push_from_other "$r" new.md fresh
+  sync; expect_rc 0
+  expect_todo git-sync:a:detached
+  [ ! -e "$(local_dir a)/new.md" ]
+  [ -z "$(json_lines | jq -r 'select(has("todo")) | select(.todo.key == "git-sync:a:remote-changed")')" ]
+}
 
 # ── todo dedupe, state pruning, deadline ──────────────────────────────────
 test_persistent_todo_is_emitted_once() {
@@ -539,6 +573,16 @@ test_deadline_defers_and_rotates() {
   [ ! -e "$(local_dir b)" ]
   sync; next_state; expect_out "b: cloned"; expect_out "deferred to the next run: c a"
   sync; next_state; expect_out "c: cloned"
+}
+test_clone_deferred_when_budget_too_small() {
+  local ra rb; ra=$(remote a); rb=$(remote b)
+  jq -n --arg a "$ra" --arg b "$rb" \
+    '{folders: [{name: "a", remote: $a}, {name: "b", remote: $b}]}' >"$GIT_SYNC_CONF/x.json"
+  export GIT_SYNC_DEADLINE=50 # b's budget (DEADLINE+30-SECONDS) is ~80s: under the 90s floor
+  sync; next_state
+  expect_out "a: cloned"
+  expect_out "deferred to the next run: b"
+  [ ! -e "$(local_dir b)" ]
 }
 test_hung_remote_times_out_and_state_is_printed() {
   local r; r=$(remote a)

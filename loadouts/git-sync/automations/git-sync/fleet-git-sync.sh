@@ -4,6 +4,7 @@
 # stdout JSON lines {"todo":…} {"notify":…} {"state":…}; exit 10 = nothing to do,
 # 0 = something changed or a problem was reported, 2 = invalid config, 1 = lock error.
 set -uo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 ROOT="${GIT_SYNC_ROOT:-/shared}"
 CONF="${GIT_SYNC_CONF:-$ROOT/.git-sync.d}"
@@ -152,6 +153,12 @@ check_clone() { # name remote branch → 0 safe; 1 skipped (todo raised)
   keys=$(g "$dir" config --local --no-includes --name-only --list 2>/dev/null) || keys="(unreadable .git/config)"
   url=$(g "$dir" config --local --no-includes --get-all remote.origin.url 2>/dev/null)
   head=$(g "$dir" symbolic-ref -q --short HEAD 2>/dev/null || sed 's|^refs/heads/||' "$dir"/.git/rebase-*/head-name 2>/dev/null)
+  if [ -z "$head" ] && ! rebase_in_progress "$dir"; then
+    todo "git-sync:$name:detached" "git-sync: $name is on a detached HEAD" \
+      "$dir is on a detached HEAD, so git-sync leaves it alone. Check out $3 to resume syncing: cd $dir && git checkout $3."
+    say "$name: is on a detached HEAD; check out $3 to resume syncing"
+    return 1
+  fi
   merge=$(g "$dir" config --local --no-includes --get "branch.$3.merge" 2>/dev/null)
   if [ "$url" != "$2" ] || [ "$head" != "$3" ] || { [ -n "$merge" ] && [ "$merge" != "refs/heads/$3" ]; }; then
     todo "git-sync:$name:remote-changed" "git-sync: $name no longer matches its config" \
@@ -160,7 +167,7 @@ check_clone() { # name remote branch → 0 safe; 1 skipped (todo raised)
     return 1
   fi
   bad=$(awk -v b="branch.$3." '!(/^core\.(repositoryformatversion|filemode|bare|logallrefupdates|autocrlf|untrackedcache|preloadindex|ignorecase|symlinks|precomposeunicode)$/ ||
-    /^remote\.origin\.(url|fetch)$/ || $0 == b "remote" || $0 == b "merge")' <<<"$keys" | sort -u)
+    /^user\.(name|email)$/ || /^remote\.origin\.(url|fetch)$/ || $0 == b "remote" || $0 == b "merge")' <<<"$keys" | sort -u)
   if [ -n "$bad" ]; then
     todo "git-sync:$name:unsafe-config" "git-sync: unexpected git config in $name" \
       "$dir/.git/config sets keys git-sync doesn't allow (they can run commands or redirect pushes), so it skips this folder. Check who set them, then remove them or move the folder aside to re-clone:"$'\n'"$bad"
@@ -185,6 +192,15 @@ pull_rebase() { # name dir → 0 ok; 1 conflict or failure (already reported)
     fi
   fi
   record_failure "$1" "pull: $(last_err)"
+  return 1
+}
+
+outside_commits_ok() { # name dir → 0 ok to push; 1 blocked (todo raised)
+  local paths; paths=$(g "$2" diff --name-only '@{u}' HEAD -- . ":(exclude)$AUTHOR" 2>/dev/null | head -n 20)
+  [ -z "$paths" ] && return 0
+  todo "git-sync:$1:outside-commits" "git-sync: commit(s) outside $AUTHOR/ in $1" \
+    "HEAD has local commit(s) touching paths outside $AUTHOR/ (someone else committed in this clone), so nothing is pushed:"$'\n'"$paths"$'\n'"Drop them with: git -C $2 reset --soft @{u}, then review before re-adding your own changes."
+  say "$1: commit(s) outside $AUTHOR/; not pushed"
   return 1
 }
 
@@ -241,9 +257,11 @@ sync_auto() { # name scoped
   if [ "$up_before" != "$up_mid" ]; then pulled=$(count "$dir" "$up_before..$up_mid"); fi
   ahead=$(count "$dir" '@{u}..HEAD')
   if [ "$ahead" -gt 0 ]; then
+    [ "$scoped" != true ] || outside_commits_ok "$name" "$dir" || return
     if ! net "$dir" push -q 2>"$ERR"; then
       pull_rebase "$name" "$dir" || return
       ahead=$(count "$dir" '@{u}..HEAD')
+      [ "$scoped" != true ] || outside_commits_ok "$name" "$dir" || return
       if ! net "$dir" push -q 2>"$ERR"; then record_failure "$name" "push: $(last_err)"; return; fi
     fi
     changed=1
@@ -308,7 +326,12 @@ total=${#rows[@]}; start=0; next=""; deferred=()
 for i in "${!rows[@]}"; do [ "${rows[i]%%$'\t'*}" != "$next_in" ] || start=$i; done
 for ((k = 0; k < total; k++)); do
   IFS=$'\t' read -r name remote branch mode scoped <<<"${rows[(start + k) % total]}"
-  if [ "$k" -gt 0 ] && [ "$SECONDS" -ge "$DEADLINE" ]; then deferred+=("$name"); continue; fi
+  if [ "$k" -gt 0 ]; then
+    if [ "$SECONDS" -ge "$DEADLINE" ] ||
+      { [ ! -d "$ROOT/$name/.git" ] && [ $((DEADLINE + 30 - SECONDS)) -lt 90 ]; }; then
+      deferred+=("$name"); continue
+    fi
+  fi
   sync_folder "$name" "$remote" "$branch" "$mode" "$scoped"
 done
 if [ ${#deferred[@]} -gt 0 ]; then

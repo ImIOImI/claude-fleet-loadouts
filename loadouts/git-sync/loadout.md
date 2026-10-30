@@ -82,11 +82,18 @@ Each todo is posted once, and again only if its details change; it isn't re-post
 | Non-git directory in the way | todo `…:not-a-repo`; never overwritten |
 | Clone's origin or branch differs from the config | todo `…:remote-changed`; skipped |
 | Unexpected keys in the clone's `.git/config` | todo `…:unsafe-config`; skipped (see below) |
+| Clone is on a detached HEAD | todo `…:detached`; skipped until you check out the branch |
+| A local commit outside your `<node id>/` folder (scoped auto-sync) | todo `…:outside-commits`; the whole push is held, not just that commit |
 | Stale hold | todo `…:stale-hold` |
 | Any failure (network, auth, timeout, no upstream, push rejected…) | quiet; notify `…:failing` on the 3rd in a row, then daily |
 
-Network calls time out after 60 s. A run stops starting folders after about 200 s and picks up the
-rest next time.
+Network calls time out after 60 s, except a first clone, which gets up to the full run budget and
+is deferred to the next run (named in stdout) if less than 90 s of that budget remains. A run stops
+starting folders after about 200 s and picks up the rest next time.
+
+With `author_scoped: false`, auto-sync pushes **any** local commit in the folder, including one
+made by another node or tool sharing the same `/shared` mount — there's no outside-commits guard.
+Use unscoped folders only where every writer is trusted.
 
 ## Security
 
