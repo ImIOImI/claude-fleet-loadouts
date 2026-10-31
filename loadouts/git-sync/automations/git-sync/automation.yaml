@@ -1,0 +1,10 @@
+name: git-sync
+description: Sync the git-backed folders configured in /shared/.git-sync.d
+tags: [git-sync]
+triggers:
+  - schedule: { cron: "*/5 * * * *" }
+  - manual: {}
+concurrency: skip
+steps:
+  - id: sync
+    script: { run: ./fleet-git-sync.sh, runIn: $self, timeout: 4m }
