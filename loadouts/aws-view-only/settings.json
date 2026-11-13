@@ -1,0 +1,5 @@
+{
+  "env": {
+    "AWS_CONFIG_FILE": "/workspace/.claude/skills/aws-view-only/aws-config"
+  }
+}

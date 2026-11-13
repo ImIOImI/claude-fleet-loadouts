@@ -1,0 +1,44 @@
+# Profiles for the claude-fleet remote workspace pod (SA fleet-agent-workspace,
+# Pod Identity role platform-ops-fleet-agent-workspace). Each chains into that
+# account's view-only role. Source: SumerSports/platform-ops
+# infra/tofu/fleet-agent/infra/workload-identity (account map + role names).
+
+[profile infra]
+role_arn          = arn:aws:iam::567639518918:role/platform-ops-fleet-agent-workspace-infra
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile dev]
+role_arn          = arn:aws:iam::267933243332:role/platform-ops-fleet-agent-workspace-dev
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile stg]
+role_arn          = arn:aws:iam::162296318744:role/platform-ops-fleet-agent-workspace-stg
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile prd]
+role_arn          = arn:aws:iam::511893001344:role/platform-ops-fleet-agent-workspace-prd
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile b2c-dev]
+role_arn          = arn:aws:iam::715841360793:role/platform-ops-fleet-agent-workspace-b2c-dev
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile b2c-stg]
+role_arn          = arn:aws:iam::084828581597:role/platform-ops-fleet-agent-workspace-b2c-stg
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile b2c-prd]
+role_arn          = arn:aws:iam::054037097233:role/platform-ops-fleet-agent-workspace-b2c-prd
+credential_source = EcsContainer
+region            = us-east-1
+
+[profile data]
+role_arn          = arn:aws:iam::533267385636:role/platform-ops-fleet-agent-workspace-data
+credential_source = EcsContainer
+region            = us-east-1
